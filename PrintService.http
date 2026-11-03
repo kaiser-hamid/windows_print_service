@@ -1,0 +1,23 @@
+# Manual requests for the Epic ERP Print Service (VS Code REST Client / Rider / Visual Studio).
+
+@baseUrl = http://127.0.0.1:9555
+@apiKey = epichealthcare@2026printserver
+
+### List printers
+GET {{baseUrl}}/api/v1/printers
+X-Api-Key: {{apiKey}}
+
+### Print a PDF on the default printer (put a sample.pdf next to this file)
+POST {{baseUrl}}/api/v1/print/pdf?copies=1&jobName=Test%20print
+X-Api-Key: {{apiKey}}
+Content-Type: application/pdf
+
+< ./sample.pdf
+
+### Missing key -> 401
+GET {{baseUrl}}/api/v1/printers
+
+### Non-localhost origin -> 403
+GET {{baseUrl}}/api/v1/printers
+X-Api-Key: {{apiKey}}
+Origin: https://evil.example.com

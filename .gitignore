@@ -1,0 +1,8 @@
+bin/
+obj/
+dist/
+TestResults/
+*.user
+.vs/
+.idea/
+sample.pdf
