@@ -8,6 +8,7 @@ public static class PrintEndpoints
     public const int MaxCopies = 99;
     public const int MaxJobNameLength = 128;
     public const string DefaultJobName = "ERP Document";
+    public const string CompatibilityReportJobName = "Compatibility Test Report";
 
     private static readonly string[] AcceptedContentTypes = ["application/pdf", "application/octet-stream"];
     private static readonly byte[] PdfSignature = "%PDF-"u8.ToArray();
@@ -20,16 +21,54 @@ public static class PrintEndpoints
         app.MapPost("/api/v1/print/pdf", PrintPdfAsync)
             .WithName("PrintPdf");
 
+        app.MapPost("/api/v1/print-compatibility-test", PrintCompatibilityTestAsync)
+            .WithName("PrintCompatibilityTest");
+
         return app;
     }
 
-    private static async Task<IResult> PrintPdfAsync(
+    /// <summary>Prints on the OS default printer.</summary>
+    private static Task<IResult> PrintPdfAsync(
         HttpContext context,
         IPrinterCatalog catalog,
         IPdfPrinter printer,
         ILoggerFactory loggerFactory,
         int? copies,
         string? jobName,
+        CancellationToken cancellationToken) =>
+        HandlePrintAsync(context, printer, loggerFactory, copies, jobName, DefaultJobName,
+            catalog.ResolveDefaultPrinter,
+            noPrinterDetail: "No default printer is set for the account the print service runs as.",
+            exactSize: false,
+            cancellationToken);
+
+    /// <summary>
+    /// Prints the compatibility test report, always on the fixed "report_print" printer, at exact size
+    /// (no scaling, aligned to the paper edge) because it's laid out for pre-printed letterhead.
+    /// </summary>
+    private static Task<IResult> PrintCompatibilityTestAsync(
+        HttpContext context,
+        IPdfPrinter printer,
+        ILoggerFactory loggerFactory,
+        int? copies,
+        string? jobName,
+        CancellationToken cancellationToken) =>
+        HandlePrintAsync(context, printer, loggerFactory, copies, jobName, CompatibilityReportJobName,
+            () => ServiceConstants.CompatibilityReportPrinter,
+            noPrinterDetail: null,
+            exactSize: true,
+            cancellationToken);
+
+    private static async Task<IResult> HandlePrintAsync(
+        HttpContext context,
+        IPdfPrinter printer,
+        ILoggerFactory loggerFactory,
+        int? copies,
+        string? jobName,
+        string defaultJobName,
+        Func<string?> resolvePrinter,
+        string? noPrinterDetail,
+        bool exactSize,
         CancellationToken cancellationToken)
     {
         var logger = loggerFactory.CreateLogger(typeof(PrintEndpoints));
@@ -44,7 +83,7 @@ public static class PrintEndpoints
         if (copyCount is < 1 or > MaxCopies)
             return Problem(StatusCodes.Status400BadRequest, "Invalid copies", $"'copies' must be between 1 and {MaxCopies}.");
 
-        var name = string.IsNullOrWhiteSpace(jobName) ? DefaultJobName : jobName.Trim();
+        var name = string.IsNullOrWhiteSpace(jobName) ? defaultJobName : jobName.Trim();
         if (name.Length > MaxJobNameLength)
             name = name[..MaxJobNameLength];
 
@@ -70,14 +109,14 @@ public static class PrintEndpoints
         if (!HasPdfSignature(pdf))
             return Problem(StatusCodes.Status400BadRequest, "Invalid PDF", "The request body is not a PDF file (missing %PDF- header).");
 
-        var printerName = catalog.ResolveDefaultPrinter();
+        var printerName = resolvePrinter();
         if (printerName is null)
-            return Problem(StatusCodes.Status503ServiceUnavailable, "No default printer",
-                "No default printer is set for the account the print service runs as.");
+            return Problem(StatusCodes.Status503ServiceUnavailable, "No default printer", noPrinterDetail ?? "No printer available.");
 
         try
         {
-            var result = await printer.PrintAsync(new PdfPrintRequest(pdf, printerName, copyCount, name), cancellationToken);
+            var printRequest = new PdfPrintRequest(pdf, printerName, copyCount, name) { ExactSize = exactSize };
+            var result = await printer.PrintAsync(printRequest, cancellationToken);
             return TypedResults.Ok(result);
         }
         catch (InvalidPdfException ex)

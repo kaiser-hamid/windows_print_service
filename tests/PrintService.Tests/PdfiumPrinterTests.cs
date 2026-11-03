@@ -26,8 +26,10 @@ public class PdfiumPrinterTests
             Printer.PrintAsync(new PdfPrintRequest(TestPdf.TwoPages(), "No Such Printer 9f3a", 1, "x"), CancellationToken.None));
     }
 
-    [Fact]
-    public async Task Renders_and_spools_to_microsoft_print_to_pdf()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Renders_and_spools_to_microsoft_print_to_pdf(bool exactSize)
     {
         if (!PrinterSettings.InstalledPrinters.Cast<string>().Contains(PdfPrinter))
             return; // Printer not installed on this machine; nothing to check.
@@ -36,7 +38,11 @@ public class PdfiumPrinterTests
         try
         {
             var result = await Printer.PrintAsync(
-                new PdfPrintRequest(TestPdf.TwoPages(), PdfPrinter, 2, "Epic print test") { PrintToFilePath = output },
+                new PdfPrintRequest(TestPdf.TwoPages(), PdfPrinter, 2, "Epic print test")
+                {
+                    PrintToFilePath = output,
+                    ExactSize = exactSize,
+                },
                 CancellationToken.None);
 
             Assert.Equal(2, result.Pages);
@@ -52,9 +58,16 @@ public class PdfiumPrinterTests
             Assert.StartsWith("%PDF-", System.Text.Encoding.ASCII.GetString(produced, 0, 5));
 
             // 2 pages x 2 copies, collated; the second page must have come out landscape.
-            var (pageCount, secondIsLandscape) = InspectPdf(produced);
-            Assert.Equal(4, pageCount);
-            Assert.True(secondIsLandscape, "Landscape page was not printed landscape");
+            var pages = InspectPdf(produced);
+            Assert.Equal(4, pages.Count);
+            Assert.True(pages[1].Width > pages[1].Height, "Landscape page was not printed landscape");
+
+            // The source pages are A4 (595 x 842 pt), so the matching A4 paper must have been picked
+            // rather than the driver's default (e.g. Letter, 612 x 792 pt).
+            Assert.InRange(pages[0].Width, 590, 600);
+            Assert.InRange(pages[0].Height, 837, 847);
+            Assert.InRange(pages[1].Width, 837, 847);
+            Assert.InRange(pages[1].Height, 590, 600);
         }
         finally
         {
@@ -63,7 +76,7 @@ public class PdfiumPrinterTests
         }
     }
 
-    private static (int PageCount, bool SecondIsLandscape) InspectPdf(byte[] pdf)
+    private static List<(float Width, float Height)> InspectPdf(byte[] pdf)
     {
         var buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal(pdf.Length);
         try
@@ -73,11 +86,14 @@ public class PdfiumPrinterTests
             Assert.NotEqual(IntPtr.Zero, doc);
             try
             {
-                var count = PdfiumNative.FPDF_GetPageCount(doc);
-                var page = PdfiumNative.FPDF_LoadPage(doc, 1);
-                var landscape = PdfiumNative.FPDF_GetPageWidthF(page) > PdfiumNative.FPDF_GetPageHeightF(page);
-                PdfiumNative.FPDF_ClosePage(page);
-                return (count, landscape);
+                var sizes = new List<(float, float)>();
+                for (var i = 0; i < PdfiumNative.FPDF_GetPageCount(doc); i++)
+                {
+                    var page = PdfiumNative.FPDF_LoadPage(doc, i);
+                    sizes.Add((PdfiumNative.FPDF_GetPageWidthF(page), PdfiumNative.FPDF_GetPageHeightF(page)));
+                    PdfiumNative.FPDF_ClosePage(page);
+                }
+                return sizes;
             }
             finally
             {

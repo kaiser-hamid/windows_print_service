@@ -33,7 +33,7 @@ $Description = 'Local print API for Epic ERP (loopback only). Lists printers and
 $EventSource = 'Epic Print Service'
 $ExeName = 'EpicErp.PrintService.exe'
 $Port = 9555
-$ApiKey = 'epichealthcare@2026printserer'
+$ApiKey = 'epichealthcare@2026printserver'
 
 # ---------------------------------------------------------------- locate / build binaries
 $tempPublish = $null

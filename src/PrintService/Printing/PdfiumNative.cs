@@ -54,6 +54,8 @@ internal static class Gdi32
 {
     public const int HORZRES = 8;
     public const int VERTRES = 10;
+    public const int PHYSICALOFFSETX = 112;
+    public const int PHYSICALOFFSETY = 113;
 
     [DllImport("gdi32.dll")]
     public static extern int GetDeviceCaps(IntPtr hdc, int index);

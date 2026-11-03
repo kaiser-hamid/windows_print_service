@@ -3,6 +3,13 @@ namespace EpicErp.PrintService.Printing;
 public sealed record PdfPrintRequest(byte[] Pdf, string PrinterName, int Copies, string JobName)
 {
     /// <summary>
+    /// true: print each page at exactly its PDF size, aligned to the physical top-left corner of the paper,
+    /// never scaled or centred (for pre-printed letterhead). Anything in the printer's unprintable edge is clipped.
+    /// false: shrink to fit the printable area if needed, and centre on the sheet.
+    /// </summary>
+    public bool ExactSize { get; init; }
+
+    /// <summary>
     /// Diagnostics/testing only, never set from the API: spool to this file instead of the device
     /// (e.g. with "Microsoft Print to PDF") so no save dialog appears.
     /// </summary>

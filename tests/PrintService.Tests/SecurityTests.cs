@@ -27,7 +27,7 @@ public class SecurityTests
     {
         using var factory = new PrintServiceFactory();
         var client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Api-Key", "epichealthcare@2026printserer");
+        client.DefaultRequestHeaders.Add("X-Api-Key", "epichealthcare@2026printserver");
         var response = await client.GetAsync("/api/v1/printers");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }

@@ -135,6 +135,79 @@ public class ApiTests
     }
 
     [Fact]
+    public async Task Compatibility_test_report_goes_to_report_print_printer()
+    {
+        using var factory = new PrintServiceFactory();
+        var response = await factory.CreateAuthorizedClient()
+            .PostAsync("/api/v1/print-compatibility-test", PdfContent(TestPdf.TwoPages()));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var sent = Assert.Single(factory.Printer.Requests);
+        Assert.Equal("report_print", sent.PrinterName);
+        Assert.Equal("Compatibility Test Report", sent.JobName);
+        Assert.Equal(1, sent.Copies);
+        Assert.True(sent.ExactSize, "Letterhead report must print at exact size");
+    }
+
+    [Fact]
+    public async Task Print_pdf_uses_fit_to_page_not_exact_size()
+    {
+        using var factory = new PrintServiceFactory();
+        await factory.CreateAuthorizedClient().PostAsync("/api/v1/print/pdf", PdfContent(TestPdf.TwoPages()));
+        Assert.False(Assert.Single(factory.Printer.Requests).ExactSize);
+    }
+
+    [Fact]
+    public async Task Compatibility_test_report_ignores_os_default_printer()
+    {
+        using var factory = new PrintServiceFactory();
+        factory.Catalog.Default = null; // no OS default printer at all
+        var response = await factory.CreateAuthorizedClient()
+            .PostAsync("/api/v1/print-compatibility-test?copies=3&jobName=CT-42", PdfContent(TestPdf.TwoPages()));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var sent = Assert.Single(factory.Printer.Requests);
+        Assert.Equal("report_print", sent.PrinterName);
+        Assert.Equal("CT-42", sent.JobName);
+        Assert.Equal(3, sent.Copies);
+    }
+
+    [Fact]
+    public async Task Compatibility_test_report_validates_like_print_pdf()
+    {
+        using var factory = new PrintServiceFactory();
+        var client = factory.CreateAuthorizedClient();
+
+        var notPdf = await client.PostAsync("/api/v1/print-compatibility-test", PdfContent("hello"u8.ToArray()));
+        var wrongType = await client.PostAsync("/api/v1/print-compatibility-test", PdfContent(TestPdf.TwoPages(), "text/plain"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, notPdf.StatusCode);
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, wrongType.StatusCode);
+        Assert.Empty(factory.Printer.Requests);
+    }
+
+    [Fact]
+    public async Task Compatibility_test_report_requires_api_key()
+    {
+        using var factory = new PrintServiceFactory();
+        var response = await factory.CreateClient()
+            .PostAsync("/api/v1/print-compatibility-test", PdfContent(TestPdf.TwoPages()));
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Missing_report_printer_returns_503()
+    {
+        using var factory = new PrintServiceFactory();
+        factory.Printer.ThrowOnPrint = new PrinterUnavailableException("Printer 'report_print' is not installed on this PC.");
+        var response = await factory.CreateAuthorizedClient()
+            .PostAsync("/api/v1/print-compatibility-test", PdfContent(TestPdf.TwoPages()));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("report_print", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Printer_failure_returns_503()
     {
         using var factory = new PrintServiceFactory();

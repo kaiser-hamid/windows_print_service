@@ -78,7 +78,9 @@ public sealed class PdfiumPdfPrinter(ILogger<PdfiumPdfPrinter> logger) : IPdfPri
         var settings = printDocument.PrinterSettings;
         settings.PrinterName = request.PrinterName;
         if (!settings.IsValid)
-            throw new PrinterUnavailableException($"Printer '{request.PrinterName}' is not available.");
+            throw new PrinterUnavailableException($"Printer '{request.PrinterName}' is not installed on this PC.");
+
+        var paperSizes = GetPaperSizes(settings);
 
         // Copies are produced by repeating the pages ourselves. Many drivers ignore the Copies setting,
         // and doing it this way keeps the output collated on every printer.
@@ -95,16 +97,19 @@ public sealed class PdfiumPdfPrinter(ILogger<PdfiumPdfPrinter> logger) : IPdfPri
 
         printDocument.BeginPrint += (_, _) => sheet = 0;
 
-        // Turn each sheet to match its page, so landscape pages print landscape on drivers that support it.
+        // Match each sheet to its PDF page: pick the printer's paper of the same size (A4 page -> A4 paper)
+        // and turn landscape pages landscape. If no paper matches, the printer's default paper is used.
         printDocument.QueryPageSettings += (_, e) =>
         {
             var (width, height) = GetPageSize(document, sheet % pageCount);
+            if (FindMatchingPaper(paperSizes, width, height) is { } paper)
+                e.PageSettings.PaperSize = paper;
             e.PageSettings.Landscape = width > height;
         };
 
         printDocument.PrintPage += (_, e) =>
         {
-            RenderPage(document, sheet % pageCount, e);
+            RenderPage(document, sheet % pageCount, request.ExactSize, e);
             sheet++;
             e.HasMorePages = sheet < totalSheets;
         };
@@ -123,6 +128,47 @@ public sealed class PdfiumPdfPrinter(ILogger<PdfiumPdfPrinter> logger) : IPdfPri
         }
     }
 
+    // A paper matches a PDF page when both sides are within ~1.3 mm (PaperSize uses 1/100 inch units).
+    private const int PaperMatchTolerance = 5;
+
+    private static List<PaperSize> GetPaperSizes(PrinterSettings settings)
+    {
+        try
+        {
+            return settings.PaperSizes.Cast<PaperSize>().Where(p => p.Width > 0 && p.Height > 0).ToList();
+        }
+        catch (Exception)
+        {
+            return []; // driver couldn't list its paper sizes; fall back to its default paper
+        }
+    }
+
+    private static PaperSize? FindMatchingPaper(List<PaperSize> paperSizes, float widthPt, float heightPt)
+    {
+        if (paperSizes.Count == 0 || widthPt <= 0 || heightPt <= 0)
+            return null;
+
+        // PDF points (1/72 inch) -> 1/100 inch, compared orientation-independently.
+        var shortSide = Math.Min(widthPt, heightPt) / 72.0 * 100;
+        var longSide = Math.Max(widthPt, heightPt) / 72.0 * 100;
+
+        PaperSize? best = null;
+        var bestError = double.MaxValue;
+        foreach (var paper in paperSizes)
+        {
+            var errorShort = Math.Abs(Math.Min(paper.Width, paper.Height) - shortSide);
+            var errorLong = Math.Abs(Math.Max(paper.Width, paper.Height) - longSide);
+            if (errorShort > PaperMatchTolerance || errorLong > PaperMatchTolerance)
+                continue;
+            if (errorShort + errorLong < bestError)
+            {
+                best = paper;
+                bestError = errorShort + errorLong;
+            }
+        }
+        return best;
+    }
+
     private static (float Width, float Height) GetPageSize(IntPtr document, int index)
     {
         var page = PdfiumNative.FPDF_LoadPage(document, index);
@@ -138,7 +184,7 @@ public sealed class PdfiumPdfPrinter(ILogger<PdfiumPdfPrinter> logger) : IPdfPri
         }
     }
 
-    private static void RenderPage(IntPtr document, int index, PrintPageEventArgs e)
+    private static void RenderPage(IntPtr document, int index, bool exactSize, PrintPageEventArgs e)
     {
         var page = PdfiumNative.FPDF_LoadPage(document, index);
         if (page == IntPtr.Zero)
@@ -173,12 +219,25 @@ public sealed class PdfiumPdfPrinter(ILogger<PdfiumPdfPrinter> logger) : IPdfPri
                     targetHeight = pageWidthPt / 72.0 * dpiY;
                 }
 
-                // Print at actual size, shrinking only when the page doesn't fit inside the printable area.
-                var scale = Math.Min(1.0, Math.Min(areaWidth / targetWidth, areaHeight / targetHeight));
-                var width = (int)Math.Round(targetWidth * scale);
-                var height = (int)Math.Round(targetHeight * scale);
-                var x = (areaWidth - width) / 2;
-                var y = (areaHeight - height) / 2;
+                int x, y, width, height;
+                if (exactSize)
+                {
+                    // 1:1, with the page's top-left on the paper's physical top-left. The DC origin is the
+                    // printable area, which starts PHYSICALOFFSET pixels in from the paper edge.
+                    width = (int)Math.Round(targetWidth);
+                    height = (int)Math.Round(targetHeight);
+                    x = -Gdi32.GetDeviceCaps(hdc, Gdi32.PHYSICALOFFSETX);
+                    y = -Gdi32.GetDeviceCaps(hdc, Gdi32.PHYSICALOFFSETY);
+                }
+                else
+                {
+                    // Print at actual size, shrinking only when the page doesn't fit inside the printable area.
+                    var scale = Math.Min(1.0, Math.Min(areaWidth / targetWidth, areaHeight / targetHeight));
+                    width = (int)Math.Round(targetWidth * scale);
+                    height = (int)Math.Round(targetHeight * scale);
+                    x = (areaWidth - width) / 2;
+                    y = (areaHeight - height) / 2;
+                }
 
                 PdfiumNative.FPDF_RenderPage(hdc, page, x, y, width, height, rotate,
                     PdfiumNative.FPDF_ANNOT | PdfiumNative.FPDF_PRINTING);
