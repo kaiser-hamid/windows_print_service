@@ -13,27 +13,15 @@ public sealed class PdfiumPdfPrinter(ILogger<PdfiumPdfPrinter> logger) : IPdfPri
     private const int LOGPIXELSX = 88;
     private const int LOGPIXELSY = 90;
 
-    // PDFium is not thread-safe, so the whole process shares one gate.
-    private static readonly SemaphoreSlim Gate = new(1, 1);
     private static readonly Lazy<bool> Initialized = new(() =>
     {
         PdfiumNative.FPDF_InitLibrary();
         return true;
     }, LazyThreadSafetyMode.ExecutionAndPublication);
 
-    public async Task<PdfPrintResult> PrintAsync(PdfPrintRequest request, CancellationToken cancellationToken)
-    {
-        await Gate.WaitAsync(cancellationToken);
-        try
-        {
-            // Once spooling has started we let it finish, so a dropped HTTP connection can't leave half a job.
-            return await Task.Run(() => PrintCore(request), CancellationToken.None);
-        }
-        finally
-        {
-            Gate.Release();
-        }
-    }
+    // PDFium is not thread-safe, so every job goes through the process-wide print queue.
+    public Task<PdfPrintResult> PrintAsync(PdfPrintRequest request, CancellationToken cancellationToken) =>
+        PrintQueue.RunAsync(() => PrintCore(request), cancellationToken);
 
     private PdfPrintResult PrintCore(PdfPrintRequest request)
     {

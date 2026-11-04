@@ -9,8 +9,10 @@ public static class PrintEndpoints
     public const int MaxJobNameLength = 128;
     public const string DefaultJobName = "ERP Document";
     public const string CompatibilityReportJobName = "Compatibility Test Report";
+    public const string SampleLabelJobName = "Sample Labels";
 
     private static readonly string[] AcceptedContentTypes = ["application/pdf", "application/octet-stream"];
+    private static readonly string[] AcceptedRawContentTypes = ["text/plain", "application/octet-stream"];
     private static readonly byte[] PdfSignature = "%PDF-"u8.ToArray();
 
     // The PDF spec allows the header anywhere in the first 1024 bytes.
@@ -23,6 +25,9 @@ public static class PrintEndpoints
 
         app.MapPost("/api/v1/print-compatibility-test", PrintCompatibilityTestAsync)
             .WithName("PrintCompatibilityTest");
+
+        app.MapPost("/api/v1/print-sample-label", PrintSampleLabelAsync)
+            .WithName("PrintSampleLabel");
 
         return app;
     }
@@ -75,7 +80,7 @@ public static class PrintEndpoints
         var request = context.Request;
         const long maxBytes = ServiceConstants.MaxPdfSizeBytes;
 
-        if (!IsAcceptedContentType(request.ContentType))
+        if (!IsAcceptedContentType(request.ContentType, AcceptedContentTypes))
             return Problem(StatusCodes.Status415UnsupportedMediaType, "Unsupported content type",
                 "Send the raw PDF bytes with Content-Type: application/pdf (or application/octet-stream).");
 
@@ -83,9 +88,7 @@ public static class PrintEndpoints
         if (copyCount is < 1 or > MaxCopies)
             return Problem(StatusCodes.Status400BadRequest, "Invalid copies", $"'copies' must be between 1 and {MaxCopies}.");
 
-        var name = string.IsNullOrWhiteSpace(jobName) ? defaultJobName : jobName.Trim();
-        if (name.Length > MaxJobNameLength)
-            name = name[..MaxJobNameLength];
+        var name = NormalizeJobName(jobName, defaultJobName);
 
         if (request.ContentLength > maxBytes)
             return TooLarge(maxBytes);
@@ -135,12 +138,83 @@ public static class PrintEndpoints
         }
     }
 
-    private static bool IsAcceptedContentType(string? contentType)
+    /// <summary>
+    /// Prints sample barcode labels on the fixed "label_print" GoDEX printer. The body is printer-ready EZPL
+    /// (possibly several labels in one job) and is spooled as a RAW job exactly as received: it is never
+    /// decoded, trimmed or re-encoded. There is deliberately no "copies" parameter: the ERP backend logs
+    /// every label print, so reprints must go through it.
+    /// </summary>
+    private static async Task<IResult> PrintSampleLabelAsync(
+        HttpContext context,
+        IRawPrinter printer,
+        ILoggerFactory loggerFactory,
+        string? jobName,
+        CancellationToken cancellationToken)
+    {
+        var logger = loggerFactory.CreateLogger(typeof(PrintEndpoints));
+        var request = context.Request;
+        const long maxBytes = ServiceConstants.MaxRawSizeBytes;
+        const string printerName = ServiceConstants.SampleLabelPrinter;
+
+        if (!IsAcceptedContentType(request.ContentType, AcceptedRawContentTypes))
+            return Problem(StatusCodes.Status415UnsupportedMediaType, "Unsupported content type",
+                "Send the raw label data with Content-Type: text/plain (or application/octet-stream).");
+
+        var name = NormalizeJobName(jobName, SampleLabelJobName);
+
+        if (request.ContentLength > maxBytes)
+            return LabelTooLarge(maxBytes);
+
+        byte[]? data;
+        try
+        {
+            data = await ReadBodyAsync(request.Body, maxBytes, cancellationToken);
+        }
+        catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
+        {
+            data = null;
+        }
+
+        if (data is null)
+            return LabelTooLarge(maxBytes);
+
+        if (IsBlank(data))
+            return Problem(StatusCodes.Status400BadRequest, "Empty body",
+                "The request body must contain the label printer data (EZPL).");
+
+        try
+        {
+            var result = await printer.PrintAsync(new RawPrintRequest(data, printerName, name), cancellationToken);
+            return TypedResults.Ok(result);
+        }
+        catch (PrinterUnavailableException ex)
+        {
+            logger.LogError(ex, "Printer '{Printer}' unavailable", printerName);
+            return Problem(StatusCodes.Status503ServiceUnavailable, "Printer unavailable", ex.Message);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Raw printing to '{Printer}' failed", printerName);
+            return Problem(StatusCodes.Status500InternalServerError, "Print failed", ex.Message);
+        }
+    }
+
+    private static string NormalizeJobName(string? jobName, string defaultJobName)
+    {
+        var name = string.IsNullOrWhiteSpace(jobName) ? defaultJobName : jobName.Trim();
+        return name.Length > MaxJobNameLength ? name[..MaxJobNameLength] : name;
+    }
+
+    private static bool IsAcceptedContentType(string? contentType, string[] accepted)
     {
         if (!MediaTypeHeaderValue.TryParse(contentType, out var parsed) || parsed.MediaType.Value is not { } mediaType)
             return false;
-        return AcceptedContentTypes.Contains(mediaType, StringComparer.OrdinalIgnoreCase);
+        return accepted.Contains(mediaType, StringComparer.OrdinalIgnoreCase);
     }
+
+    /// <summary>True when the body is empty or only ASCII whitespace (space, tab, CR, LF, VT, FF).</summary>
+    private static bool IsBlank(byte[] data) =>
+        data.AsSpan().IndexOfAnyExcept(" \t\r\n\v\f"u8) < 0;
 
     /// <summary>Reads the body into memory. Returns null when it exceeds <paramref name="maxBytes"/>.</summary>
     private static async Task<byte[]?> ReadBodyAsync(Stream body, long maxBytes, CancellationToken cancellationToken)
@@ -166,6 +240,10 @@ public static class PrintEndpoints
     private static IResult TooLarge(long maxBytes) =>
         Problem(StatusCodes.Status413PayloadTooLarge, "PDF too large",
             $"The PDF exceeds the maximum allowed size of {maxBytes / (1024 * 1024)} MB.");
+
+    private static IResult LabelTooLarge(long maxBytes) =>
+        Problem(StatusCodes.Status413PayloadTooLarge, "Label data too large",
+            $"The label data exceeds the maximum allowed size of {maxBytes / (1024 * 1024)} MB.");
 
     private static IResult Problem(int status, string title, string detail) =>
         TypedResults.Problem(statusCode: status, title: title, detail: detail);

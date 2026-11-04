@@ -8,6 +8,7 @@ without the browser's print dialog.
 - Every call needs the API key in the `X-Api-Key` header.
 - **CORS allows localhost origins only** (any port). Requests from any other web origin are rejected with `403`.
 - Renders PDFs with Google's **PDFium** engine directly onto the printer's device context, so output is sharp and no external PDF reader is needed.
+- Sends barcode label data (GoDEX EZPL) to the label printer **as a RAW job, byte for byte**.
 
 There is nothing to configure. All settings are fixed in the code ([`ServiceConstants.cs`](src/PrintService/ServiceConstants.cs)):
 
@@ -17,8 +18,10 @@ There is nothing to configure. All settings are fixed in the code ([`ServiceCons
 | API key (`X-Api-Key`) | `epichealthcare@2026printserver` |
 | Allowed browser origins | `http(s)://localhost`, `127.0.0.1`, `[::1]`, any port |
 | Max PDF size | 50 MB |
+| Max label data size | 1 MB |
 | Printer for `/print/pdf` | OS default printer of the service account |
 | Printer for `/print-compatibility-test` | `report_print` |
+| Printer for `/print-sample-label` | `label_print` |
 
 | | |
 |---|---|
@@ -39,6 +42,7 @@ To change any of these values, edit `ServiceConstants.cs`, rebuild with `publish
 - [Uninstall](#uninstall)
 - [Default printer](#default-printer)
 - [Report printer (`report_print`)](#report-printer-report_print)
+- [Label printer (`label_print`)](#label-printer-label_print)
 - [Security model](#security-model)
 - [API reference](#api-reference)
 - [Calling it from the React app](#calling-it-from-the-react-app)
@@ -138,6 +142,30 @@ The service picks up the new name immediately, with no restart needed. Like any 
 installed on the machine rather than mapped per user (see [Default printer](#default-printer)). If no printer has
 that name, the API returns `503`. Check with `GET /api/v1/printers`.
 
+## Label printer (`label_print`)
+
+`POST /api/v1/print-sample-label` always prints on a printer named exactly **`label_print`**: the GoDEX label printer
+with 38 × 25 mm label stock. On each PC:
+
+1. Install the **GoDEX driver** for the model (e.g. *Godex G500*). If you don't have it, Windows' built-in
+   **Generic / Text Only** driver works too, because the service never uses the driver to render anything.
+   Install it on the machine (*Settings → Printers & scanners → Add device*, or the GoDEX installer run as
+   administrator), **not per user**, so the service account can see it (see [Default printer](#default-printer)).
+2. Rename the queue to `label_print`, in an elevated PowerShell:
+
+   ```powershell
+   Get-Printer | Where-Object DriverName -like '*Godex*'      # find the current name
+   Rename-Printer -Name 'Godex G500' -NewName 'label_print'
+   ```
+
+The new name takes effect immediately, with no restart needed. If no printer has that name, or Windows reports it
+offline, the API returns `503`.
+
+**RAW jobs bypass the driver's rendering.** The label data goes to the printer exactly as sent, so the driver's
+*Printing Preferences* (paper size, darkness, speed, orientation) have **no effect**. Label size, darkness, speed,
+gap/sensor and position all come from the EZPL commands in the data (`^Q`, `^W`, `^H`, `^S`, …) and from the printer's
+own setup (calibration, front-panel / GoLabel settings). Calibrate the printer for the 38 × 25 mm stock once.
+
 ---
 
 ## Security model
@@ -148,7 +176,7 @@ that name, the API returns `503`. Check with `GET /api/v1/printers`.
 | **Origin guard** | If a request has an `Origin` header that isn't localhost, it's rejected with `403` **before** anything runs. CORS on its own only stops the browser from *reading* a response; this stops a malicious web page from *triggering* a print. |
 | **CORS** | Allowed origins: `http(s)://localhost`, `127.0.0.1` and `[::1]` on any port. Allowed methods: `GET`, `POST`. Allowed request headers: `X-Api-Key`, `Content-Type`. No credentials/cookies. |
 | **API key** | Every request (except CORS preflight) needs `X-Api-Key: epichealthcare@2026printserver`, compared in constant time. Missing or wrong key → `401`. |
-| **Input limits** | 50 MB size limit, content-type check, `%PDF-` signature check, `copies` 1–99, job name trimmed to 128 chars. |
+| **Input limits** | 50 MB PDF / 1 MB label data size limits, content-type check, `%PDF-` signature check, `copies` 1–99, job name trimmed to 128 chars. |
 
 > The key is compiled into the service and shipped in the React bundle, so treat it as a lock against other
 > websites and casual misuse, not as a secret. Anything running on the PC can read it.
@@ -281,6 +309,48 @@ paper is used (e.g. A4, which is 5 mm narrower), and the page lands on the wrong
 - Jobs are processed one at a time. Concurrent requests queue up.
 - `200` means *spooled*, not *physically printed*. A printer that's out of paper will still accept the job.
 
+### `POST /api/v1/print-sample-label`
+
+Prints sample barcode labels on the printer named **`label_print`** (see [Label printer](#label-printer-label_print)).
+The request **body is raw printer data**: GoDEX EZPL, plain ASCII text with CRLF line endings. It can hold several labels
+concatenated into one job. The service sends it to the printer as a Windows **RAW** spooler job, **byte for byte**. It isn't
+decoded or re-encoded, trimmed, or line-ending normalised, no BOM is added or stripped, and nothing is appended. Nothing is
+rendered (no PDFium/GDI).
+
+| | |
+|---|---|
+| Header `Content-Type` | `text/plain` (any `charset` parameter, e.g. `text/plain; charset=utf-8`) or `application/octet-stream` |
+| Query `jobName` | optional, name shown in the Windows print queue, default `Sample Labels` (trimmed, max 128 chars) |
+
+There is no printer, paper or `copies` parameter. Every label print is logged by the ERP backend, so reprints must go through
+it and can't be multiplied here. To print several labels, put them all in the body.
+
+```bash
+curl -X POST "http://127.0.0.1:9555/api/v1/print-sample-label?jobName=Sample%20labels%20S2610310001" \
+     -H "X-Api-Key: epichealthcare@2026printserver" \
+     -H "Content-Type: text/plain; charset=utf-8" \
+     --data-binary "@label.ezpl"
+```
+
+Use `--data-binary` (not `-d`/`--data`, which strip the line breaks).
+
+`200 OK`: returned once the job has been handed to the Windows spooler (spooled, not physically printed).
+`bytes` is the number of bytes sent, which is always the full body.
+
+```json
+{ "printer": "label_print", "jobName": "Sample labels S2610310001", "bytes": 412 }
+```
+
+| Status | Title | When |
+|---|---|---|
+| `400` | `Empty body` | Body is 0 bytes or only whitespace |
+| `413` | `Label data too large` | Body over 1 MB |
+| `415` | `Unsupported content type` | `Content-Type` isn't `text/plain` / `application/octet-stream` |
+| `503` | `Printer unavailable` | No printer named `label_print` is installed, it's offline, or the spooler rejected the job (`OpenPrinter`, `StartDocPrinter` or `WritePrinter` failed, or not every byte was written). `detail` says which. A partly written job is cancelled. |
+| `500` | `Print failed` | Unexpected error (details in the Event Log) |
+
+Label jobs share the queue with the PDF endpoints, so all jobs are processed one at a time.
+
 ---
 
 ## Calling it from the React app
@@ -328,6 +398,20 @@ export async function printCompatibilityTestReport(pdf: Blob, opts: { copies?: n
   return res.json(); // { printer: 'report_print', jobName, pages, copies }
 }
 
+// ezpl: the EZPL string (CRLF line endings) from the ERP backend, which logs every label print.
+export async function printSampleLabels(ezpl: string, opts: { jobName?: string } = {}) {
+  const qs = new URLSearchParams();
+  if (opts.jobName) qs.set('jobName', opts.jobName);
+
+  const res = await fetch(`${PRINT_SERVICE}/api/v1/print-sample-label?${qs}`, {
+    method: 'POST',
+    headers: { 'X-Api-Key': PRINT_KEY, 'Content-Type': 'text/plain; charset=utf-8' },
+    body: ezpl, // sent as-is; the service doesn't change a byte
+  });
+  if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
+  return res.json(); // { printer: 'label_print', jobName, bytes }
+}
+
 // e.g. print a PDF fetched from the ERP backend on the default printer
 const pdf = await (await fetch('/api/invoices/1001/pdf')).blob();
 await printPdf(pdf, { jobName: 'Invoice 1001' });
@@ -351,6 +435,8 @@ means it isn't running on this PC.
 | `401 Unauthorized` | Wrong or missing `X-Api-Key`. It must be exactly `epichealthcare@2026printserver`. |
 | `503 No default printer` | LocalSystem has no default printer. See [Default printer](#default-printer). |
 | `503` *Printer 'report_print' is not installed on this PC* | Rename the report printer to exactly `report_print`. See [Report printer](#report-printer-report_print). |
+| `503` *Printer 'label_print' is not installed on this PC* / *is offline* | Rename the GoDEX queue to exactly `label_print` and check it's connected. See [Label printer](#label-printer-label_print). |
+| Labels print blank, shifted or the wrong size | RAW jobs ignore the driver settings. Fix the EZPL commands (`^Q`, `^W`, `^H`) or recalibrate the printer for the 38 × 25 mm stock. |
 | Wrong paper size | The PDF's page size decides the paper. Generate the PDF at the size you want, and check that the printer offers that paper (Printing Preferences). |
 | Printer missing from the list | It's mapped per user. Install it for all users / as a local port printer. |
 | Prints on the wrong printer | LocalSystem's default differs from the user's. See [Default printer](#default-printer). |
@@ -369,6 +455,8 @@ Requirements: .NET 10 SDK, Windows.
 ```powershell
 dotnet build
 dotnet test                          # security, API, and real PDFium rendering via "Microsoft Print to PDF"
+                                     # (the real RAW spooler test runs only if a v3 queue on NUL:/FILE: exists, e.g.
+                                     #  Add-Printer -Name epic_raw_test -DriverName 'Generic / Text Only' -PortName 'NUL:')
 dotnet run --project src/PrintService
 ```
 
@@ -386,10 +474,11 @@ Print service/
 │  └─ uninstall.ps1                   (admin)
 ├─ src/PrintService/
 │  ├─ Program.cs                      host, loopback Kestrel, middleware pipeline, endpoints
-│  ├─ ServiceConstants.cs             port, API key, report printer name, size limit, service name
+│  ├─ ServiceConstants.cs             port, API key, report/label printer names, size limits, service name
 │  ├─ Security/                       OriginGuardMiddleware, LocalhostOriginPolicy, ApiKeyMiddleware
 │  ├─ Printing/                       WindowsPrinterCatalog (printers + WMI status),
-│  │                                  PdfiumPdfPrinter (PDFium → printer HDC), PdfiumNative (P/Invoke)
+│  │                                  PdfiumPdfPrinter (PDFium → printer HDC), PdfiumNative (P/Invoke),
+│  │                                  WinSpoolRawPrinter (RAW spooler jobs), PrintQueue (one job at a time)
 │  └─ Endpoints/                      PrinterEndpoints, PrintEndpoints
 └─ tests/PrintService.Tests/          xUnit + WebApplicationFactory
 ```

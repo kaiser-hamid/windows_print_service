@@ -15,6 +15,12 @@ public static class ServiceConstants
     /// <summary>Printer that POST /api/v1/print-compatibility-test always prints to.</summary>
     public const string CompatibilityReportPrinter = "report_print";
 
+    /// <summary>GoDEX label printer that POST /api/v1/print-sample-label always prints to (RAW EZPL).</summary>
+    public const string SampleLabelPrinter = "label_print";
+
     /// <summary>Largest PDF accepted (50 MB).</summary>
     public const long MaxPdfSizeBytes = 50L * 1024 * 1024;
+
+    /// <summary>Largest raw label job accepted (1 MB).</summary>
+    public const long MaxRawSizeBytes = 1L * 1024 * 1024;
 }

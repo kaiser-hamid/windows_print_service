@@ -13,6 +13,7 @@ public sealed class PrintServiceFactory : WebApplicationFactory<Program>
 {
     public FakePrinterCatalog Catalog { get; } = new();
     public FakePdfPrinter Printer { get; } = new();
+    public FakeRawPrinter RawPrinter { get; } = new();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -20,8 +21,10 @@ public sealed class PrintServiceFactory : WebApplicationFactory<Program>
         {
             services.RemoveAll<IPrinterCatalog>();
             services.RemoveAll<IPdfPrinter>();
+            services.RemoveAll<IRawPrinter>();
             services.AddSingleton<IPrinterCatalog>(Catalog);
             services.AddSingleton<IPdfPrinter>(Printer);
+            services.AddSingleton<IRawPrinter>(RawPrinter);
         });
     }
 
@@ -57,5 +60,19 @@ public sealed class FakePdfPrinter : IPdfPrinter
             throw ThrowOnPrint;
         Requests.Add(request);
         return Task.FromResult(new PdfPrintResult(request.PrinterName, request.JobName, 2, request.Copies));
+    }
+}
+
+public sealed class FakeRawPrinter : IRawPrinter
+{
+    public List<RawPrintRequest> Requests { get; } = [];
+    public Exception? ThrowOnPrint { get; set; }
+
+    public Task<RawPrintResult> PrintAsync(RawPrintRequest request, CancellationToken cancellationToken)
+    {
+        if (ThrowOnPrint is not null)
+            throw ThrowOnPrint;
+        Requests.Add(request);
+        return Task.FromResult(new RawPrintResult(request.PrinterName, request.JobName, request.Data.Length));
     }
 }

@@ -21,6 +21,31 @@ Content-Type: application/pdf
 
 < ./sample.pdf
 
+### Print sample barcode labels (raw GoDEX EZPL, CRLF line endings) on the "label_print" printer
+# The body is sent to the printer byte for byte. The inline body below uses this file's line endings; to send
+# exact CRLF data, replace it with a file reference: < ./label.ezpl
+POST {{baseUrl}}/api/v1/print-sample-label?jobName=Sample%20labels%20S2610310001
+X-Api-Key: {{apiKey}}
+Content-Type: text/plain; charset=utf-8
+
+^Q25,3
+^W38
+^H10
+^P1
+^S3
+^AD
+^C1
+^R0
+~Q+0
+^O0
+^D0
+^E12
+~R255
+^L
+BQ,20,20,2,5,60,0,1,S2610310001
+AB,20,100,1,1,0,0E,S2610310001
+E
+
 ### Missing key -> 401
 GET {{baseUrl}}/api/v1/printers
 

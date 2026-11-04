@@ -42,6 +42,7 @@ builder.Services.AddCors(cors => cors.AddPolicy(CorsPolicyName, policy => policy
 builder.Services.AddProblemDetails();
 builder.Services.AddSingleton<IPrinterCatalog, WindowsPrinterCatalog>();
 builder.Services.AddSingleton<IPdfPrinter, PdfiumPdfPrinter>();
+builder.Services.AddSingleton<IRawPrinter, WinSpoolRawPrinter>();
 
 var app = builder.Build();
 
