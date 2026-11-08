@@ -18,10 +18,8 @@ There is nothing to configure. All settings are fixed in the code ([`ServiceCons
 | API key (`X-Api-Key`) | `epichealthcare@2026printserver` |
 | Allowed browser origins | `http(s)://localhost`, `127.0.0.1`, `[::1]`, any port |
 | Max PDF size | 50 MB |
-| Max label data size | 1 MB |
-| Printer for `/print/pdf` | OS default printer of the service account |
-| Printer for `/print-compatibility-test` | `report_print` |
-| Printer for `/print-sample-label` | `label_print` |
+| Max raw print data size | 1 MB |
+| Printer for `/print/pdf` and `/print/raw` | chosen by the caller in the `X-Printer-Name` header (required) |
 
 | | |
 |---|---|
@@ -40,9 +38,8 @@ To change any of these values, edit `ServiceConstants.cs`, rebuild with `publish
 - [Install](#install)
 - [Update](#update)
 - [Uninstall](#uninstall)
-- [Default printer](#default-printer)
-- [Report printer (`report_print`)](#report-printer-report_print)
-- [Label printer (`label_print`)](#label-printer-label_print)
+- [Choosing the printer](#choosing-the-printer)
+- [Label printers (RAW)](#label-printers-raw)
 - [Security model](#security-model)
 - [API reference](#api-reference)
 - [Calling it from the React app](#calling-it-from-the-react-app)
@@ -107,64 +104,38 @@ This stops and deletes the service, then removes the install folder and the Even
 
 ---
 
-## Default printer
+## Choosing the printer
 
-`POST /api/v1/print/pdf` always prints on the **OS default printer of the service account**. The service runs as
-**LocalSystem**, which has its *own* default printer, separate from the logged-in user's.
-`GET /api/v1/printers` reports which printer that is (`defaultPrinter`).
+Both print endpoints (`/api/v1/print/pdf` and `/api/v1/print/raw`) print on the printer the **caller names in the
+`X-Printer-Name` header**. The header is required. The service no longer has a built-in or default printer.
 
-- Locally attached printers (USB, or network printers added via *Settings → Printers*) are installed per machine and visible to the service.
-- Printers **mapped per user** (e.g. `\\server\printer` connected from a user session or through a logon script) are **not** visible to LocalSystem. Install them for all users, or add them as a local TCP/IP port printer.
-- To change which printer LocalSystem uses, run this in an elevated PowerShell, then restart the service:
+- The name must match an **installed** printer exactly (case and surrounding spaces are ignored). Get the names from `GET /api/v1/printers`.
+- A missing header, or a name that isn't installed, returns `400` before any job is spooled.
+- Locally attached printers (USB, or network printers added via *Settings → Printers*) are installed per machine and visible to the service, which runs as **LocalSystem**.
+- Printers **mapped per user** (e.g. `\\server\printer` connected from a user session or through a logon script) are **not** visible to LocalSystem and will not appear in the list. Install them for all users, or add them as a local TCP/IP port printer.
 
-  ```powershell
-  # Sets the default printer for LocalSystem (S-1-5-18)
-  $printer = 'HP LaserJet Pro M402-M403 n-dne PCL 6'
-  New-Item -Path 'Registry::HKEY_USERS\S-1-5-18\Software\Microsoft\Windows NT\CurrentVersion\Windows' -Force | Out-Null
-  Set-ItemProperty -Path 'Registry::HKEY_USERS\S-1-5-18\Software\Microsoft\Windows NT\CurrentVersion\Windows' -Name Device -Value "$printer,winspool,Ne00:"
-  Restart-Service EpicPrintService
-  ```
+## Label printers (RAW)
 
-## Report printer (`report_print`)
-
-`POST /api/v1/print-compatibility-test` ignores the default printer and always prints on a printer named exactly
-**`report_print`**. On each PC, rename the printer meant for compatibility test reports:
-
-*Settings → Bluetooth & devices → Printers & scanners → (printer) → Printer properties → General tab → name: `report_print`*
-
-or, in an elevated PowerShell:
-
-```powershell
-Rename-Printer -Name 'HP LaserJet Pro M402-M403 n-dne PCL 6' -NewName 'report_print'
-```
-
-The service picks up the new name immediately, with no restart needed. Like any printer the service uses, it must be
-installed on the machine rather than mapped per user (see [Default printer](#default-printer)). If no printer has
-that name, the API returns `503`. Check with `GET /api/v1/printers`.
-
-## Label printer (`label_print`)
-
-`POST /api/v1/print-sample-label` always prints on a printer named exactly **`label_print`**: the GoDEX label printer
-with 38 × 25 mm label stock. On each PC:
+`POST /api/v1/print/raw` sends the body to the named printer as a Windows **RAW** spooler job. It is meant for GoDEX label
+printers (38 × 25 mm label stock in our case). On each PC:
 
 1. Install the **GoDEX driver** for the model (e.g. *Godex G500*). If you don't have it, Windows' built-in
    **Generic / Text Only** driver works too, because the service never uses the driver to render anything.
    Install it on the machine (*Settings → Printers & scanners → Add device*, or the GoDEX installer run as
-   administrator), **not per user**, so the service account can see it (see [Default printer](#default-printer)).
-2. Rename the queue to `label_print`, in an elevated PowerShell:
+   administrator), **not per user**, so the service account can see it (see [Choosing the printer](#choosing-the-printer)).
+2. Note the queue name (`Get-Printer | Where-Object DriverName -like '*Godex*'`) and send that name in `X-Printer-Name`.
+   Renaming the queue to something stable (e.g. `Barcode_Print`) is optional but makes the client config the same on every PC:
 
    ```powershell
-   Get-Printer | Where-Object DriverName -like '*Godex*'      # find the current name
-   Rename-Printer -Name 'Godex G500' -NewName 'label_print'
+   Rename-Printer -Name 'Godex G500' -NewName 'Barcode_Print'
    ```
 
-The new name takes effect immediately, with no restart needed. If no printer has that name, or Windows reports it
-offline, the API returns `503`.
+The new name takes effect immediately, with no restart needed. If Windows reports the printer offline, the API returns `503`.
 
-**RAW jobs bypass the driver's rendering.** The label data goes to the printer exactly as sent, so the driver's
+**RAW jobs bypass the driver's rendering.** The data goes to the printer exactly as sent, so the driver's
 *Printing Preferences* (paper size, darkness, speed, orientation) have **no effect**. Label size, darkness, speed,
 gap/sensor and position all come from the EZPL commands in the data (`^Q`, `^W`, `^H`, `^S`, …) and from the printer's
-own setup (calibration, front-panel / GoLabel settings). Calibrate the printer for the 38 × 25 mm stock once.
+own setup (calibration, front-panel / GoLabel settings). Calibrate the printer for the stock once.
 
 ---
 
@@ -174,9 +145,9 @@ own setup (calibration, front-panel / GoLabel settings). Calibrate the printer f
 |---|---|
 | **Loopback binding** | Kestrel listens only on `127.0.0.1` and `[::1]`. The API is unreachable from the network, so no firewall rule is needed. |
 | **Origin guard** | If a request has an `Origin` header that isn't localhost, it's rejected with `403` **before** anything runs. CORS on its own only stops the browser from *reading* a response; this stops a malicious web page from *triggering* a print. |
-| **CORS** | Allowed origins: `http(s)://localhost`, `127.0.0.1` and `[::1]` on any port. Allowed methods: `GET`, `POST`. Allowed request headers: `X-Api-Key`, `Content-Type`. No credentials/cookies. |
+| **CORS** | Allowed origins: `http(s)://localhost`, `127.0.0.1` and `[::1]` on any port. Allowed methods: `GET`, `POST`. Allowed request headers: `X-Api-Key`, `X-Printer-Name`, `Content-Type`. No credentials/cookies. |
 | **API key** | Every request (except CORS preflight) needs `X-Api-Key: epichealthcare@2026printserver`, compared in constant time. Missing or wrong key → `401`. |
-| **Input limits** | 50 MB PDF / 1 MB label data size limits, content-type check, `%PDF-` signature check, `copies` 1–99, job name trimmed to 128 chars. |
+| **Input limits** | 50 MB PDF / 1 MB raw data size limits, content-type check, `%PDF-` signature check, `copies` 1–99, job name trimmed to 128 chars. |
 
 > The key is compiled into the service and shipped in the React bundle, so treat it as a lock against other
 > websites and casual misuse, not as a secret. Anything running on the PC can read it.
@@ -203,7 +174,7 @@ Common errors for every endpoint:
 
 ### `GET /api/v1/printers`
 
-Lists the printers installed for the service account, and says which one jobs will go to.
+Lists the printers installed for the service account. Use a `name` from this list in the `X-Printer-Name` header.
 
 ```bash
 curl -H "X-Api-Key: epichealthcare@2026printserver" http://127.0.0.1:9555/api/v1/printers
@@ -223,7 +194,7 @@ curl -H "X-Api-Key: epichealthcare@2026printserver" http://127.0.0.1:9555/api/v1
 
 | Field | Description |
 |---|---|
-| `defaultPrinter` | The printer `POST /api/v1/print/pdf` will use, or `null` if there is no default printer |
+| `defaultPrinter` | The OS default printer of the service account, or `null` if there is none. Informational only: print requests always name their printer |
 | `name` | Exact printer name |
 | `isDefault` | `true` for the printer above |
 | `status` | `Idle`, `Printing`, `Warmup`, `Stopped`, `Offline`, `Other`, `Unknown`, or `null` if Windows couldn't report it |
@@ -232,17 +203,20 @@ curl -H "X-Api-Key: epichealthcare@2026printserver" http://127.0.0.1:9555/api/v1
 
 ### `POST /api/v1/print/pdf`
 
-Prints a PDF on the default printer. The request **body is the raw PDF file** (binary, not multipart, not base64).
+Prints a PDF on the printer named in `X-Printer-Name`. The request **body is the raw PDF file** (binary, not multipart, not base64).
 
 | | |
 |---|---|
+| Header `X-Printer-Name` | **required**, name of an installed printer (see [Choosing the printer](#choosing-the-printer)) |
 | Header `Content-Type` | `application/pdf` (or `application/octet-stream`) |
 | Query `copies` | optional, 1–99, default `1`. Copies are collated. |
 | Query `jobName` | optional, name shown in the Windows print queue, default `ERP Document` (max 128 chars) |
+| Query `exactSize` | optional, `true` prints every page 1:1 aligned to the paper edge (see below), default `false` |
 
 ```bash
 curl -X POST "http://127.0.0.1:9555/api/v1/print/pdf?copies=2&jobName=Invoice%20INV-1001" \
      -H "X-Api-Key: epichealthcare@2026printserver" \
+     -H "X-Printer-Name: HP LaserJet Pro M402-M403 n-dne PCL 6" \
      -H "Content-Type: application/pdf" \
      --data-binary "@invoice.pdf"
 ```
@@ -255,79 +229,55 @@ curl -X POST "http://127.0.0.1:9555/api/v1/print/pdf?copies=2&jobName=Invoice%20
 
 | Status | When |
 |---|---|
-| `400` | Empty body, not a PDF, corrupted or password-protected PDF, or `copies` out of range |
+| `400` | `X-Printer-Name` missing or not an installed printer, empty body, not a PDF, corrupted or password-protected PDF, or `copies` out of range |
 | `413` | PDF larger than 50 MB |
 | `415` | `Content-Type` isn't `application/pdf` / `application/octet-stream` |
-| `503` | No default printer, or the printer isn't available or rejected the job |
+| `503` | The printer is offline/unavailable or rejected the job |
 | `500` | Unexpected printing error (details in the Event Log) |
 
-### `POST /api/v1/print-compatibility-test`
+**PDFs of different sizes.** Send one request per PDF. Paper size comes from each PDF page, so you don't send one, and a
+single PDF with mixed page sizes works too:
 
-Prints a compatibility test report PDF, always on the printer named **`report_print`** (see
-[Report printer](#report-printer-report_print)), whatever the default printer is.
-
-Same request as `/api/v1/print/pdf`: the body is the raw PDF, `Content-Type: application/pdf`, with optional `copies` and
-`jobName` (default `Compatibility Test Report`). There is no printer or paper-size parameter.
-
-```bash
-curl -X POST "http://127.0.0.1:9555/api/v1/print-compatibility-test?jobName=CT-2026-0042" \
-     -H "X-Api-Key: epichealthcare@2026printserver" \
-     -H "Content-Type: application/pdf" \
-     --data-binary "@compatibility-report.pdf"
-```
-
-`200 OK`
-
-```json
-{ "printer": "report_print", "jobName": "CT-2026-0042", "pages": 2, "copies": 1 }
-```
-
-Errors are the same as `/api/v1/print/pdf`, except that `503` here means **no printer named `report_print` is installed**
-(or it rejected the job).
-
-**Exact size for letterhead.** The report is laid out for 215 × 292 mm pre-printed letterhead, so this endpoint prints every
-page **1:1**: no scaling and no centring, with the page's top-left on the paper's top-left. Anything inside the printer's
-unprintable edge (usually 3–5 mm) is clipped, so the report layout must keep its content inside that edge.
-
-215 × 292 mm isn't a standard paper size, so set it up once on each `report_print` PC:
-
-1. *Print management*: run `printui /s /t2`, open the **Forms** tab, tick *Create a new form*, name it `Letterhead 215x292`, set
-   width **21.5 cm** and height **29.2 cm**, all margins 0, then *Save Form*.
-2. In `report_print` → *Printing Preferences*, choose paper size `Letterhead 215x292` for the tray that holds the letterhead.
-
-The service then matches the report's 215 × 292 mm pages to that form automatically. Without the form, the driver's default
-paper is used (e.g. A4, which is 5 mm narrower), and the page lands on the wrong paper size.
-
-### Printing behaviour (both print endpoints)
-
-- **Paper size comes from the PDF**, so you don't send one. For each page the service picks the printer's paper with the same
-  size (A4 page → A4, Letter → Letter, within ±1.3 mm). If the printer has no matching paper, it uses the printer's
-  default paper. To control the paper, generate the PDF at that page size.
-- `/print/pdf`: each page prints at **actual size**. It's only shrunk, keeping its proportions, if it doesn't fit the printer's printable area, and it's centred on the sheet.
-- `/print-compatibility-test`: each page prints at **exact size** (1:1, aligned to the paper edge, never scaled). See above.
+- For each page the service picks the printer's paper with the same size (A4 page → A4, Letter → Letter, within ±1.3 mm).
+  If the printer has no matching paper, it uses the printer's default paper. Add custom sizes as forms in Windows (see below).
+- Each page prints at **actual size**. It's only shrunk, keeping its proportions, if it doesn't fit the printer's printable area, and it's centred on the sheet.
 - Landscape pages are printed landscape. If the driver ignores orientation, the content is rotated to fit.
 - Jobs are processed one at a time. Concurrent requests queue up.
 - `200` means *spooled*, not *physically printed*. A printer that's out of paper will still accept the job.
 
-### `POST /api/v1/print-sample-label`
+**Exact size for letterhead (`exactSize=true`).** For pre-printed letterhead, every page prints **1:1**: no scaling and no
+centring, with the page's top-left on the paper's top-left. Anything inside the printer's unprintable edge (usually 3–5 mm)
+is clipped, so the layout must keep its content inside that edge.
 
-Prints sample barcode labels on the printer named **`label_print`** (see [Label printer](#label-printer-label_print)).
-The request **body is raw printer data**: GoDEX EZPL, plain ASCII text with CRLF line endings. It can hold several labels
-concatenated into one job. The service sends it to the printer as a Windows **RAW** spooler job, **byte for byte**. It isn't
-decoded or re-encoded, trimmed, or line-ending normalised, no BOM is added or stripped, and nothing is appended. Nothing is
-rendered (no PDFium/GDI).
+A size like 215 × 292 mm isn't a standard paper, so set it up once on each PC that prints it:
+
+1. *Print management*: run `printui /s /t2`, open the **Forms** tab, tick *Create a new form*, name it e.g. `Letterhead 215x292`, set
+   width **21.5 cm** and height **29.2 cm**, all margins 0, then *Save Form*.
+2. In the printer's *Printing Preferences*, choose that paper size for the tray that holds the letterhead.
+
+The service then matches the PDF's 215 × 292 mm pages to that form automatically. Without the form, the driver's default
+paper is used (e.g. A4, which is 5 mm narrower), and the page lands on the wrong paper size.
+
+### `POST /api/v1/print/raw`
+
+Prints raw printer data on the printer named in `X-Printer-Name`, e.g. GoDEX EZPL label data (plain ASCII text with CRLF
+line endings; several labels can be concatenated into one job; see [Label printers](#label-printers-raw)). The service
+sends the body to the printer as a Windows **RAW** spooler job, **byte for byte**. It isn't decoded or re-encoded, trimmed,
+or line-ending normalised, no BOM is added or stripped, and nothing is appended. Nothing is rendered (no PDFium/GDI).
 
 | | |
 |---|---|
+| Header `X-Printer-Name` | **required**, name of an installed printer |
 | Header `Content-Type` | `text/plain` (any `charset` parameter, e.g. `text/plain; charset=utf-8`) or `application/octet-stream` |
-| Query `jobName` | optional, name shown in the Windows print queue, default `Sample Labels` (trimmed, max 128 chars) |
+| Query `jobName` | optional, name shown in the Windows print queue, default `Raw Print` (trimmed, max 128 chars) |
 
-There is no printer, paper or `copies` parameter. Every label print is logged by the ERP backend, so reprints must go through
+There is no paper or `copies` parameter. Every label print is logged by the ERP backend, so reprints must go through
 it and can't be multiplied here. To print several labels, put them all in the body.
 
 ```bash
-curl -X POST "http://127.0.0.1:9555/api/v1/print-sample-label?jobName=Sample%20labels%20S2610310001" \
+curl -X POST "http://127.0.0.1:9555/api/v1/print/raw?jobName=Sample%20labels%20S2610310001" \
      -H "X-Api-Key: epichealthcare@2026printserver" \
+     -H "X-Printer-Name: Barcode_Print" \
      -H "Content-Type: text/plain; charset=utf-8" \
      --data-binary "@label.ezpl"
 ```
@@ -338,18 +288,23 @@ Use `--data-binary` (not `-d`/`--data`, which strip the line breaks).
 `bytes` is the number of bytes sent, which is always the full body.
 
 ```json
-{ "printer": "label_print", "jobName": "Sample labels S2610310001", "bytes": 412 }
+{ "printer": "Barcode_Print", "jobName": "Sample labels S2610310001", "bytes": 412 }
 ```
 
 | Status | Title | When |
 |---|---|---|
+| `400` | `Printer name required` / `Unknown printer` | `X-Printer-Name` is missing, or names a printer that isn't installed |
 | `400` | `Empty body` | Body is 0 bytes or only whitespace |
-| `413` | `Label data too large` | Body over 1 MB |
+| `413` | `Print data too large` | Body over 1 MB |
 | `415` | `Unsupported content type` | `Content-Type` isn't `text/plain` / `application/octet-stream` |
-| `503` | `Printer unavailable` | No printer named `label_print` is installed, it's offline, or the spooler rejected the job (`OpenPrinter`, `StartDocPrinter` or `WritePrinter` failed, or not every byte was written). `detail` says which. A partly written job is cancelled. |
+| `503` | `Printer unavailable` | The printer is offline, or the spooler rejected the job (`OpenPrinter`, `StartDocPrinter` or `WritePrinter` failed, or not every byte was written). `detail` says which. A partly written job is cancelled. |
 | `500` | `Print failed` | Unexpected error (details in the Event Log) |
 
-Label jobs share the queue with the PDF endpoints, so all jobs are processed one at a time.
+Raw jobs share the queue with the PDF endpoint, so all jobs are processed one at a time.
+
+> The former `POST /api/v1/print-compatibility-test` (fixed `report_print` printer) and `POST /api/v1/print-sample-label`
+> (fixed `Barcode_Print` printer) routes have been removed. Use `/print/pdf?exactSize=true` and `/print/raw` with
+> `X-Printer-Name` instead.
 
 ---
 
@@ -370,55 +325,50 @@ export async function listPrinters() {
   return res.json(); // { defaultPrinter, printers: [...] }
 }
 
-export async function printPdf(pdf: Blob, opts: { copies?: number; jobName?: string } = {}) {
+// printer: exact name of an installed printer (pick one from listPrinters()).
+export async function printPdf(
+  pdf: Blob,
+  printer: string,
+  opts: { copies?: number; jobName?: string; exactSize?: boolean } = {},
+) {
   const qs = new URLSearchParams();
   if (opts.copies) qs.set('copies', String(opts.copies));
   if (opts.jobName) qs.set('jobName', opts.jobName);
+  if (opts.exactSize) qs.set('exactSize', 'true');
 
   const res = await fetch(`${PRINT_SERVICE}/api/v1/print/pdf?${qs}`, {
     method: 'POST',
-    headers: { 'X-Api-Key': PRINT_KEY, 'Content-Type': 'application/pdf' },
+    headers: { 'X-Api-Key': PRINT_KEY, 'X-Printer-Name': printer, 'Content-Type': 'application/pdf' },
     body: pdf,
   });
   if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
   return res.json(); // { printer, jobName, pages, copies }
 }
 
-export async function printCompatibilityTestReport(pdf: Blob, opts: { copies?: number; jobName?: string } = {}) {
-  const qs = new URLSearchParams();
-  if (opts.copies) qs.set('copies', String(opts.copies));
-  if (opts.jobName) qs.set('jobName', opts.jobName);
-
-  const res = await fetch(`${PRINT_SERVICE}/api/v1/print-compatibility-test?${qs}`, {
-    method: 'POST',
-    headers: { 'X-Api-Key': PRINT_KEY, 'Content-Type': 'application/pdf' },
-    body: pdf,
-  });
-  if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
-  return res.json(); // { printer: 'report_print', jobName, pages, copies }
-}
-
 // ezpl: the EZPL string (CRLF line endings) from the ERP backend, which logs every label print.
-export async function printSampleLabels(ezpl: string, opts: { jobName?: string } = {}) {
+export async function printRaw(ezpl: string, printer: string, opts: { jobName?: string } = {}) {
   const qs = new URLSearchParams();
   if (opts.jobName) qs.set('jobName', opts.jobName);
 
-  const res = await fetch(`${PRINT_SERVICE}/api/v1/print-sample-label?${qs}`, {
+  const res = await fetch(`${PRINT_SERVICE}/api/v1/print/raw?${qs}`, {
     method: 'POST',
-    headers: { 'X-Api-Key': PRINT_KEY, 'Content-Type': 'text/plain; charset=utf-8' },
+    headers: { 'X-Api-Key': PRINT_KEY, 'X-Printer-Name': printer, 'Content-Type': 'text/plain; charset=utf-8' },
     body: ezpl, // sent as-is; the service doesn't change a byte
   });
   if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
-  return res.json(); // { printer: 'label_print', jobName, bytes }
+  return res.json(); // { printer, jobName, bytes }
 }
 
-// e.g. print a PDF fetched from the ERP backend on the default printer
+// e.g. print a PDF fetched from the ERP backend on a chosen printer
 const pdf = await (await fetch('/api/invoices/1001/pdf')).blob();
-await printPdf(pdf, { jobName: 'Invoice 1001' });
+await printPdf(pdf, 'HP LaserJet Pro M402-M403 n-dne PCL 6', { jobName: 'Invoice 1001' });
 
-// compatibility test report -> always the "report_print" printer
+// letterhead report, 1:1 without scaling
 const report = await (await fetch('/api/compatibility-tests/42/report.pdf')).blob();
-await printCompatibilityTestReport(report, { jobName: 'Compatibility Test 42' });
+await printPdf(report, 'report_print', { jobName: 'Compatibility Test 42', exactSize: true });
+
+// barcode labels on the GoDEX queue
+await printRaw(ezpl, 'Barcode_Print', { jobName: 'Sample labels S2610310001' });
 ```
 
 To detect whether the service is installed, call `listPrinters()`. A network error (`TypeError: Failed to fetch`)
@@ -433,13 +383,13 @@ means it isn't running on this PC.
 | `fetch` fails with a network error | The service isn't running. Check `Get-Service EpicPrintService` and try `Start-Service EpicPrintService`. |
 | Browser console: *blocked by CORS policy* / API returns `403` | The page isn't served from localhost. Only localhost origins are allowed. |
 | `401 Unauthorized` | Wrong or missing `X-Api-Key`. It must be exactly `epichealthcare@2026printserver`. |
-| `503 No default printer` | LocalSystem has no default printer. See [Default printer](#default-printer). |
-| `503` *Printer 'report_print' is not installed on this PC* | Rename the report printer to exactly `report_print`. See [Report printer](#report-printer-report_print). |
-| `503` *Printer 'label_print' is not installed on this PC* / *is offline* | Rename the GoDEX queue to exactly `label_print` and check it's connected. See [Label printer](#label-printer-label_print). |
+| `400 Printer name required` | The `X-Printer-Name` header is missing. Send the exact name of an installed printer. See [Choosing the printer](#choosing-the-printer). |
+| `400 Unknown printer` | No installed printer has that name. Copy a `name` from `GET /api/v1/printers`. Per-user mapped printers are not visible to the service. |
+| `503 Printer unavailable` | The named printer is offline or rejected the job. Check it is connected and not set to *Use Printer Offline*. |
 | Labels print blank, shifted or the wrong size | RAW jobs ignore the driver settings. Fix the EZPL commands (`^Q`, `^W`, `^H`) or recalibrate the printer for the 38 × 25 mm stock. |
 | Wrong paper size | The PDF's page size decides the paper. Generate the PDF at the size you want, and check that the printer offers that paper (Printing Preferences). |
-| Printer missing from the list | It's mapped per user. Install it for all users / as a local port printer. |
-| Prints on the wrong printer | LocalSystem's default differs from the user's. See [Default printer](#default-printer). |
+| Printer missing from the list | It's mapped per user. Install it for all users / as a local port printer (see [Choosing the printer](#choosing-the-printer)). |
+| Prints on the wrong printer | The client sent a different `X-Printer-Name` than intended. Check the header value. |
 | Job sits in the queue | Printer offline or out of paper. `200` only means the job was spooled. |
 | Service won't start | Event Viewer → Application → source *Epic Print Service* / *.NET Runtime*. Common cause: port 9555 already in use (`Get-NetTCPConnection -LocalPort 9555`). |
 
@@ -474,7 +424,7 @@ Print service/
 │  └─ uninstall.ps1                   (admin)
 ├─ src/PrintService/
 │  ├─ Program.cs                      host, loopback Kestrel, middleware pipeline, endpoints
-│  ├─ ServiceConstants.cs             port, API key, report/label printer names, size limits, service name
+│  ├─ ServiceConstants.cs             port, API key, size limits, service name
 │  ├─ Security/                       OriginGuardMiddleware, LocalhostOriginPolicy, ApiKeyMiddleware
 │  ├─ Printing/                       WindowsPrinterCatalog (printers + WMI status),
 │  │                                  PdfiumPdfPrinter (PDFium → printer HDC), PdfiumNative (P/Invoke),

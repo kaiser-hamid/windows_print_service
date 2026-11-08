@@ -8,8 +8,10 @@ public static class PrintEndpoints
     public const int MaxCopies = 99;
     public const int MaxJobNameLength = 128;
     public const string DefaultJobName = "ERP Document";
-    public const string CompatibilityReportJobName = "Compatibility Test Report";
-    public const string SampleLabelJobName = "Sample Labels";
+    public const string RawJobName = "Raw Print";
+
+    /// <summary>Request header carrying the name of the installed printer to print on (required).</summary>
+    public const string PrinterNameHeader = "X-Printer-Name";
 
     private static readonly string[] AcceptedContentTypes = ["application/pdf", "application/octet-stream"];
     private static readonly string[] AcceptedRawContentTypes = ["text/plain", "application/octet-stream"];
@@ -23,57 +25,25 @@ public static class PrintEndpoints
         app.MapPost("/api/v1/print/pdf", PrintPdfAsync)
             .WithName("PrintPdf");
 
-        app.MapPost("/api/v1/print-compatibility-test", PrintCompatibilityTestAsync)
-            .WithName("PrintCompatibilityTest");
-
-        app.MapPost("/api/v1/print-sample-label", PrintSampleLabelAsync)
-            .WithName("PrintSampleLabel");
+        app.MapPost("/api/v1/print/raw", PrintRawAsync)
+            .WithName("PrintRaw");
 
         return app;
     }
 
-    /// <summary>Prints on the OS default printer.</summary>
-    private static Task<IResult> PrintPdfAsync(
+    /// <summary>
+    /// Prints a PDF on the installed printer named in the X-Printer-Name header. Each page picks the printer
+    /// paper that matches its own size. With exactSize=true pages print 1:1 aligned to the paper edge
+    /// (for pre-printed letterhead) instead of being fitted to the printable area.
+    /// </summary>
+    private static async Task<IResult> PrintPdfAsync(
         HttpContext context,
         IPrinterCatalog catalog,
         IPdfPrinter printer,
         ILoggerFactory loggerFactory,
         int? copies,
         string? jobName,
-        CancellationToken cancellationToken) =>
-        HandlePrintAsync(context, printer, loggerFactory, copies, jobName, DefaultJobName,
-            catalog.ResolveDefaultPrinter,
-            noPrinterDetail: "No default printer is set for the account the print service runs as.",
-            exactSize: false,
-            cancellationToken);
-
-    /// <summary>
-    /// Prints the compatibility test report, always on the fixed "report_print" printer, at exact size
-    /// (no scaling, aligned to the paper edge) because it's laid out for pre-printed letterhead.
-    /// </summary>
-    private static Task<IResult> PrintCompatibilityTestAsync(
-        HttpContext context,
-        IPdfPrinter printer,
-        ILoggerFactory loggerFactory,
-        int? copies,
-        string? jobName,
-        CancellationToken cancellationToken) =>
-        HandlePrintAsync(context, printer, loggerFactory, copies, jobName, CompatibilityReportJobName,
-            () => ServiceConstants.CompatibilityReportPrinter,
-            noPrinterDetail: null,
-            exactSize: true,
-            cancellationToken);
-
-    private static async Task<IResult> HandlePrintAsync(
-        HttpContext context,
-        IPdfPrinter printer,
-        ILoggerFactory loggerFactory,
-        int? copies,
-        string? jobName,
-        string defaultJobName,
-        Func<string?> resolvePrinter,
-        string? noPrinterDetail,
-        bool exactSize,
+        bool? exactSize,
         CancellationToken cancellationToken)
     {
         var logger = loggerFactory.CreateLogger(typeof(PrintEndpoints));
@@ -88,7 +58,11 @@ public static class PrintEndpoints
         if (copyCount is < 1 or > MaxCopies)
             return Problem(StatusCodes.Status400BadRequest, "Invalid copies", $"'copies' must be between 1 and {MaxCopies}.");
 
-        var name = NormalizeJobName(jobName, defaultJobName);
+        var (printerName, printerError) = ResolvePrinter(request, catalog);
+        if (printerName is null)
+            return printerError!;
+
+        var name = NormalizeJobName(jobName, DefaultJobName);
 
         if (request.ContentLength > maxBytes)
             return TooLarge(maxBytes);
@@ -112,13 +86,9 @@ public static class PrintEndpoints
         if (!HasPdfSignature(pdf))
             return Problem(StatusCodes.Status400BadRequest, "Invalid PDF", "The request body is not a PDF file (missing %PDF- header).");
 
-        var printerName = resolvePrinter();
-        if (printerName is null)
-            return Problem(StatusCodes.Status503ServiceUnavailable, "No default printer", noPrinterDetail ?? "No printer available.");
-
         try
         {
-            var printRequest = new PdfPrintRequest(pdf, printerName, copyCount, name) { ExactSize = exactSize };
+            var printRequest = new PdfPrintRequest(pdf, printerName, copyCount, name) { ExactSize = exactSize ?? false };
             var result = await printer.PrintAsync(printRequest, cancellationToken);
             return TypedResults.Ok(result);
         }
@@ -139,13 +109,14 @@ public static class PrintEndpoints
     }
 
     /// <summary>
-    /// Prints sample barcode labels on the fixed "label_print" GoDEX printer. The body is printer-ready EZPL
-    /// (possibly several labels in one job) and is spooled as a RAW job exactly as received: it is never
+    /// Prints printer-ready data (e.g. GoDEX EZPL labels, possibly several in one job) on the installed printer
+    /// named in the X-Printer-Name header. The body is spooled as a RAW job exactly as received: it is never
     /// decoded, trimmed or re-encoded. There is deliberately no "copies" parameter: the ERP backend logs
     /// every label print, so reprints must go through it.
     /// </summary>
-    private static async Task<IResult> PrintSampleLabelAsync(
+    private static async Task<IResult> PrintRawAsync(
         HttpContext context,
+        IPrinterCatalog catalog,
         IRawPrinter printer,
         ILoggerFactory loggerFactory,
         string? jobName,
@@ -154,16 +125,19 @@ public static class PrintEndpoints
         var logger = loggerFactory.CreateLogger(typeof(PrintEndpoints));
         var request = context.Request;
         const long maxBytes = ServiceConstants.MaxRawSizeBytes;
-        const string printerName = ServiceConstants.SampleLabelPrinter;
 
         if (!IsAcceptedContentType(request.ContentType, AcceptedRawContentTypes))
             return Problem(StatusCodes.Status415UnsupportedMediaType, "Unsupported content type",
-                "Send the raw label data with Content-Type: text/plain (or application/octet-stream).");
+                "Send the raw print data with Content-Type: text/plain (or application/octet-stream).");
 
-        var name = NormalizeJobName(jobName, SampleLabelJobName);
+        var (printerName, printerError) = ResolvePrinter(request, catalog);
+        if (printerName is null)
+            return printerError!;
+
+        var name = NormalizeJobName(jobName, RawJobName);
 
         if (request.ContentLength > maxBytes)
-            return LabelTooLarge(maxBytes);
+            return RawTooLarge(maxBytes);
 
         byte[]? data;
         try
@@ -176,11 +150,11 @@ public static class PrintEndpoints
         }
 
         if (data is null)
-            return LabelTooLarge(maxBytes);
+            return RawTooLarge(maxBytes);
 
         if (IsBlank(data))
             return Problem(StatusCodes.Status400BadRequest, "Empty body",
-                "The request body must contain the label printer data (EZPL).");
+                "The request body must contain the printer data (e.g. EZPL).");
 
         try
         {
@@ -197,6 +171,25 @@ public static class PrintEndpoints
             logger.LogError(ex, "Raw printing to '{Printer}' failed", printerName);
             return Problem(StatusCodes.Status500InternalServerError, "Print failed", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Reads the X-Printer-Name header and resolves it to an installed printer (case-insensitive).
+    /// Returns the exact installed name, or a 400 problem when the header is missing or names no installed printer.
+    /// </summary>
+    private static (string? PrinterName, IResult? Error) ResolvePrinter(HttpRequest request, IPrinterCatalog catalog)
+    {
+        var requested = request.Headers[PrinterNameHeader].ToString().Trim();
+        if (requested.Length == 0)
+            return (null, Problem(StatusCodes.Status400BadRequest, "Printer name required",
+                $"Send the printer name in the {PrinterNameHeader} header. List the installed printers with GET /api/v1/printers."));
+
+        var installed = catalog.FindInstalledPrinter(requested);
+        if (installed is null)
+            return (null, Problem(StatusCodes.Status400BadRequest, "Unknown printer",
+                $"No printer named '{requested}' is installed on this PC. List the installed printers with GET /api/v1/printers."));
+
+        return (installed, null);
     }
 
     private static string NormalizeJobName(string? jobName, string defaultJobName)
@@ -241,9 +234,9 @@ public static class PrintEndpoints
         Problem(StatusCodes.Status413PayloadTooLarge, "PDF too large",
             $"The PDF exceeds the maximum allowed size of {maxBytes / (1024 * 1024)} MB.");
 
-    private static IResult LabelTooLarge(long maxBytes) =>
-        Problem(StatusCodes.Status413PayloadTooLarge, "Label data too large",
-            $"The label data exceeds the maximum allowed size of {maxBytes / (1024 * 1024)} MB.");
+    private static IResult RawTooLarge(long maxBytes) =>
+        Problem(StatusCodes.Status413PayloadTooLarge, "Print data too large",
+            $"The print data exceeds the maximum allowed size of {maxBytes / (1024 * 1024)} MB.");
 
     private static IResult Problem(int status, string title, string detail) =>
         TypedResults.Problem(statusCode: status, title: title, detail: detail);

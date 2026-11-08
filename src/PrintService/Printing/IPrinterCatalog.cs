@@ -16,4 +16,10 @@ public interface IPrinterCatalog
 
     /// <summary>The OS default printer of the account the service runs as, or null if there is none.</summary>
     string? ResolveDefaultPrinter();
+
+    /// <summary>
+    /// Finds an installed printer by name (case-insensitive) and returns its exact installed name,
+    /// or null if no such printer is installed.
+    /// </summary>
+    string? FindInstalledPrinter(string name);
 }

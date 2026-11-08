@@ -7,9 +7,9 @@ using EpicErp.PrintService.Printing;
 
 namespace PrintService.Tests;
 
-public class SampleLabelApiTests
+public class RawPrintApiTests
 {
-    private const string Url = "/api/v1/print-sample-label";
+    private const string Url = "/api/v1/print/raw";
 
     // Two 38 x 25 mm labels in one job, CRLF line endings, as the ERP backend generates them.
     private static readonly byte[] Ezpl = Encoding.ASCII.GetBytes(
@@ -25,20 +25,20 @@ public class SampleLabelApiTests
     }
 
     [Fact]
-    public async Task Label_data_is_passed_to_label_print_byte_for_byte()
+    public async Task Data_is_passed_to_the_header_printer_byte_for_byte()
     {
         using var factory = new PrintServiceFactory();
-        var response = await factory.CreateAuthorizedClient()
+        var response = await factory.CreatePrintClient("Label Printer")
             .PostAsync($"{Url}?jobName=Sample%20labels%20S2610310001", Raw(Ezpl));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        Assert.Equal("label_print", json.RootElement.GetProperty("printer").GetString());
+        Assert.Equal("Label Printer", json.RootElement.GetProperty("printer").GetString());
         Assert.Equal("Sample labels S2610310001", json.RootElement.GetProperty("jobName").GetString());
         Assert.Equal(Ezpl.Length, json.RootElement.GetProperty("bytes").GetInt32());
 
         var sent = Assert.Single(factory.RawPrinter.Requests);
-        Assert.Equal(ServiceConstants.SampleLabelPrinter, sent.PrinterName);
+        Assert.Equal("Label Printer", sent.PrinterName);
         Assert.Equal(Ezpl, sent.Data); // same bytes, CRLF kept, nothing appended
     }
 
@@ -48,7 +48,7 @@ public class SampleLabelApiTests
         // Leading/trailing whitespace, a UTF-8 BOM, mixed LF/CRLF and a non-ASCII byte must all survive.
         var body = new byte[] { 0xEF, 0xBB, 0xBF, (byte)' ', (byte)'^', (byte)'L', (byte)'\n', (byte)'E', (byte)'\r', (byte)'\n', 0xE9, (byte)'\r', (byte)'\n', (byte)' ' };
         using var factory = new PrintServiceFactory();
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(body));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(body));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(body, Assert.Single(factory.RawPrinter.Requests).Data);
@@ -58,11 +58,11 @@ public class SampleLabelApiTests
     public async Task Octet_stream_is_accepted_and_job_name_defaults()
     {
         using var factory = new PrintServiceFactory();
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(Ezpl, "application/octet-stream"));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(Ezpl, "application/octet-stream"));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var sent = Assert.Single(factory.RawPrinter.Requests);
-        Assert.Equal("Sample Labels", sent.JobName);
+        Assert.Equal("Raw Print", sent.JobName);
         Assert.Equal(Ezpl, sent.Data);
     }
 
@@ -71,7 +71,7 @@ public class SampleLabelApiTests
     {
         using var factory = new PrintServiceFactory();
         var longName = new string('x', 200);
-        var client = factory.CreateAuthorizedClient();
+        var client = factory.CreatePrintClient("Label Printer");
 
         await client.PostAsync($"{Url}?jobName=%20%20Batch%207%20%20", Raw(Ezpl));
         await client.PostAsync($"{Url}?jobName={longName}", Raw(Ezpl));
@@ -88,7 +88,7 @@ public class SampleLabelApiTests
     public async Task Accepted_content_types(string contentType)
     {
         using var factory = new PrintServiceFactory();
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(Ezpl, contentType));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(Ezpl, contentType));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
@@ -101,7 +101,7 @@ public class SampleLabelApiTests
     public async Task Other_content_types_return_415(string? contentType)
     {
         using var factory = new PrintServiceFactory();
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(Ezpl, contentType));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(Ezpl, contentType));
 
         Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
@@ -116,7 +116,7 @@ public class SampleLabelApiTests
     public async Task Empty_or_whitespace_body_returns_400(string body)
     {
         using var factory = new PrintServiceFactory();
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(Encoding.ASCII.GetBytes(body)));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(Encoding.ASCII.GetBytes(body)));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Contains("Empty body", await response.Content.ReadAsStringAsync());
@@ -130,7 +130,7 @@ public class SampleLabelApiTests
         var data = new byte[ServiceConstants.MaxRawSizeBytes];
         Array.Fill(data, (byte)'A');
 
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(data));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(data));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(data, Assert.Single(factory.RawPrinter.Requests).Data);
@@ -143,10 +143,10 @@ public class SampleLabelApiTests
         var data = new byte[ServiceConstants.MaxRawSizeBytes + 1];
         Array.Fill(data, (byte)'A');
 
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(data));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(data));
 
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
-        Assert.Contains("Label data too large", await response.Content.ReadAsStringAsync());
+        Assert.Contains("Print data too large", await response.Content.ReadAsStringAsync());
         Assert.Empty(factory.RawPrinter.Requests);
     }
 
@@ -159,24 +159,56 @@ public class SampleLabelApiTests
         var content = new UnknownLengthContent(data);
         content.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
 
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, content);
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, content);
 
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
         Assert.Empty(factory.RawPrinter.Requests);
     }
 
     [Fact]
-    public async Task Missing_label_printer_returns_503()
+    public async Task Missing_printer_header_returns_400()
     {
         using var factory = new PrintServiceFactory();
-        factory.RawPrinter.ThrowOnPrint = new PrinterUnavailableException("Printer 'label_print' is not installed on this PC.");
-
         var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(Ezpl));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("Printer name required", await response.Content.ReadAsStringAsync());
+        Assert.Empty(factory.RawPrinter.Requests);
+    }
+
+    [Fact]
+    public async Task Unknown_printer_returns_400()
+    {
+        using var factory = new PrintServiceFactory();
+        var response = await factory.CreatePrintClient("No Such Printer").PostAsync(Url, Raw(Ezpl));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("Unknown printer", await response.Content.ReadAsStringAsync());
+        Assert.Empty(factory.RawPrinter.Requests);
+    }
+
+    [Fact]
+    public async Task Printer_name_is_case_insensitive_and_resolved_to_the_installed_name()
+    {
+        using var factory = new PrintServiceFactory();
+        var response = await factory.CreatePrintClient("label printer").PostAsync(Url, Raw(Ezpl));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("Label Printer", Assert.Single(factory.RawPrinter.Requests).PrinterName);
+    }
+
+    [Fact]
+    public async Task Printer_that_spooler_rejects_returns_503()
+    {
+        using var factory = new PrintServiceFactory();
+        factory.RawPrinter.ThrowOnPrint = new PrinterUnavailableException("Printer 'Label Printer' is not installed on this PC.");
+
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(Ezpl));
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("Printer unavailable", body);
-        Assert.Contains("label_print", body);
+        Assert.Contains("Label Printer", body);
     }
 
     [Fact]
@@ -185,7 +217,7 @@ public class SampleLabelApiTests
         using var factory = new PrintServiceFactory();
         factory.RawPrinter.ThrowOnPrint = new InvalidOperationException("boom");
 
-        var response = await factory.CreateAuthorizedClient().PostAsync(Url, Raw(Ezpl));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync(Url, Raw(Ezpl));
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
         Assert.Contains("Print failed", await response.Content.ReadAsStringAsync());
@@ -195,7 +227,7 @@ public class SampleLabelApiTests
     public async Task Copies_parameter_is_ignored()
     {
         using var factory = new PrintServiceFactory();
-        var response = await factory.CreateAuthorizedClient().PostAsync($"{Url}?copies=5", Raw(Ezpl));
+        var response = await factory.CreatePrintClient("Label Printer").PostAsync($"{Url}?copies=5", Raw(Ezpl));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(Ezpl, Assert.Single(factory.RawPrinter.Requests).Data);
@@ -215,7 +247,7 @@ public class SampleLabelApiTests
     public async Task Foreign_origin_is_forbidden()
     {
         using var factory = new PrintServiceFactory();
-        var client = factory.CreateAuthorizedClient();
+        var client = factory.CreatePrintClient("Label Printer");
         client.DefaultRequestHeaders.Add("Origin", "https://evil.example.com");
 
         var response = await client.PostAsync(Url, Raw(Ezpl));

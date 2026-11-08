@@ -44,6 +44,9 @@ public sealed class WindowsPrinterCatalog(ILogger<WindowsPrinterCatalog> logger)
         return null;
     }
 
+    public string? FindInstalledPrinter(string name) =>
+        GetInstalledPrinterNames().FirstOrDefault(p => string.Equals(p, name, StringComparison.OrdinalIgnoreCase));
+
     private static List<string> GetInstalledPrinterNames()
     {
         var list = new List<string>();

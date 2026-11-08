@@ -36,7 +36,7 @@ builder.WebHost.ConfigureKestrel(kestrel =>
 builder.Services.AddCors(cors => cors.AddPolicy(CorsPolicyName, policy => policy
     .SetIsOriginAllowed(LocalhostOriginPolicy.IsAllowed)
     .WithMethods(HttpMethods.Get, HttpMethods.Post)
-    .WithHeaders(ApiKeyMiddleware.HeaderName, "Content-Type")
+    .WithHeaders(ApiKeyMiddleware.HeaderName, EpicErp.PrintService.Endpoints.PrintEndpoints.PrinterNameHeader, "Content-Type")
     .SetPreflightMaxAge(TimeSpan.FromMinutes(10))));
 
 builder.Services.AddProblemDetails();

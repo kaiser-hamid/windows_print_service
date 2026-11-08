@@ -1,4 +1,5 @@
 using EpicErp.PrintService;
+using EpicErp.PrintService.Endpoints;
 using EpicErp.PrintService.Printing;
 using EpicErp.PrintService.Security;
 using Microsoft.AspNetCore.Hosting;
@@ -34,6 +35,14 @@ public sealed class PrintServiceFactory : WebApplicationFactory<Program>
         client.DefaultRequestHeaders.Add(ApiKeyMiddleware.HeaderName, ServiceConstants.ApiKey);
         return client;
     }
+
+    /// <summary>Authorized client that also names the printer to print on, like a real caller.</summary>
+    public HttpClient CreatePrintClient(string printerName = "Office Laser")
+    {
+        var client = CreateAuthorizedClient();
+        client.DefaultRequestHeaders.Add(PrintEndpoints.PrinterNameHeader, printerName);
+        return client;
+    }
 }
 
 public sealed class FakePrinterCatalog : IPrinterCatalog
@@ -47,6 +56,10 @@ public sealed class FakePrinterCatalog : IPrinterCatalog
     ]);
 
     public string? ResolveDefaultPrinter() => Default;
+
+    public string? FindInstalledPrinter(string name) =>
+        GetPrinters().Printers.Select(p => p.Name)
+            .FirstOrDefault(p => string.Equals(p, name, StringComparison.OrdinalIgnoreCase));
 }
 
 public sealed class FakePdfPrinter : IPdfPrinter

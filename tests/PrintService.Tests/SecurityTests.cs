@@ -81,7 +81,7 @@ public class SecurityTests
         var request = new HttpRequestMessage(HttpMethod.Options, "/api/v1/print/pdf");
         request.Headers.Add("Origin", "http://localhost:3000");
         request.Headers.Add("Access-Control-Request-Method", "POST");
-        request.Headers.Add("Access-Control-Request-Headers", "x-api-key,content-type");
+        request.Headers.Add("Access-Control-Request-Headers", "x-api-key,x-printer-name,content-type");
 
         var response = await factory.CreateClient().SendAsync(request);
 
@@ -89,6 +89,7 @@ public class SecurityTests
         Assert.Equal("http://localhost:3000", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
         var allowedHeaders = string.Join(",", response.Headers.GetValues("Access-Control-Allow-Headers")).ToLowerInvariant();
         Assert.Contains("x-api-key", allowedHeaders);
+        Assert.Contains("x-printer-name", allowedHeaders);
         Assert.Contains("content-type", allowedHeaders);
     }
 

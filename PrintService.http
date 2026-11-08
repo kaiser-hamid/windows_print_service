@@ -2,30 +2,37 @@
 
 @baseUrl = http://127.0.0.1:9555
 @apiKey = epichealthcare@2026printserver
+# Exact name of an installed printer, as returned by GET /api/v1/printers
+@printer = Office Laser
+@labelPrinter = Barcode_Print
 
 ### List printers
 GET {{baseUrl}}/api/v1/printers
 X-Api-Key: {{apiKey}}
 
-### Print a PDF on the default printer (put a sample.pdf next to this file)
+### Print a PDF on the printer named in X-Printer-Name (put a sample.pdf next to this file)
+# Each page uses the paper that matches its own size, so mixed-size PDFs work.
 POST {{baseUrl}}/api/v1/print/pdf?copies=1&jobName=Test%20print
 X-Api-Key: {{apiKey}}
+X-Printer-Name: {{printer}}
 Content-Type: application/pdf
 
 < ./sample.pdf
 
-### Print the compatibility test report on the "report_print" printer
-POST {{baseUrl}}/api/v1/print-compatibility-test?jobName=Compatibility%20Test
+### Print a PDF at exact size (1:1, aligned to the paper edge; e.g. pre-printed letterhead)
+POST {{baseUrl}}/api/v1/print/pdf?exactSize=true&jobName=Compatibility%20Test
 X-Api-Key: {{apiKey}}
+X-Printer-Name: {{printer}}
 Content-Type: application/pdf
 
 < ./sample.pdf
 
-### Print sample barcode labels (raw GoDEX EZPL, CRLF line endings) on the "label_print" printer
+### Print raw printer data (GoDEX EZPL, CRLF line endings) on the printer named in X-Printer-Name
 # The body is sent to the printer byte for byte. The inline body below uses this file's line endings; to send
 # exact CRLF data, replace it with a file reference: < ./label.ezpl
-POST {{baseUrl}}/api/v1/print-sample-label?jobName=Sample%20labels%20S2610310001
+POST {{baseUrl}}/api/v1/print/raw?jobName=Sample%20labels%20S2610310001
 X-Api-Key: {{apiKey}}
+X-Printer-Name: {{labelPrinter}}
 Content-Type: text/plain; charset=utf-8
 
 ^Q25,3
@@ -45,6 +52,13 @@ Content-Type: text/plain; charset=utf-8
 BQ,20,20,2,5,60,0,1,S2610310001
 AB,20,100,1,1,0,0E,S2610310001
 E
+
+### Missing X-Printer-Name -> 400
+POST {{baseUrl}}/api/v1/print/pdf
+X-Api-Key: {{apiKey}}
+Content-Type: application/pdf
+
+< ./sample.pdf
 
 ### Missing key -> 401
 GET {{baseUrl}}/api/v1/printers
